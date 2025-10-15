@@ -1,53 +1,101 @@
-"""
-Download and prepare e-commerce datasets for the project
-"""
-
 import os
-import zipfile
 import shutil
+import logging
 from pathlib import Path
+from typing import Optional, Dict, List
+from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 
-def setup_kaggle():
+def get_free_disk_space(path: str = ".") -> int:
+    """Get free disk space in bytes"""
+    import shutil
+    stat = shutil.disk_usage(path)
+    return stat.free
+
+
+def format_size(bytes: int) -> str:
+    """Format bytes to human-readable size"""
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if bytes < 1024.0:
+            return f"{bytes:.1f} {unit}"
+        bytes /= 1024.0
+    return f"{bytes:.1f} PB"
+
+
+def check_disk_space(required_gb: float, path: str = ".") -> bool:
+    """Check if enough disk space is available"""
+    required_bytes = required_gb * 1024 * 1024 * 1024
+    free_space = get_free_disk_space(path)
+    
+    if free_space < required_bytes:
+        logger.error(f"Insufficient disk space!")
+        logger.error(f"Required: {format_size(required_bytes)}")
+        logger.error(f"Available: {format_size(free_space)}")
+        return False
+    
+    logger.info(f"Disk space check passed: {format_size(free_space)} available")
+    return True
+
+
+def setup_kaggle() -> bool:
     """Check if Kaggle API is configured"""
     try:
         import kaggle
-        print("✓ Kaggle API configured")
+        logger.info("Kaggle API configured")
         return True
     except OSError:
-        print("❌ Kaggle API not configured")
-        print("\nSetup instructions:")
-        print("1. Go to https://www.kaggle.com/account")
-        print("2. Click 'Create New API Token'")
-        print("3. Save kaggle.json to:")
-        print("   - Windows: C:\\Users\\<username>\\.kaggle\\kaggle.json")
-        print("   - Linux/Mac: ~/.kaggle/kaggle.json")
+        logger.error("Kaggle API not configured")
+        logger.info("\nSetup instructions:")
+        logger.info("1. Go to https://www.kaggle.com/account")
+        logger.info("2. Click 'Create New API Token'")
+        logger.info("3. Save kaggle.json to:")
+        logger.info("   - Windows: C:\\Users\\<username>\\.kaggle\\kaggle.json")
+        logger.info("   - Linux/Mac: ~/.kaggle/kaggle.json")
+        return False
+    except ImportError:
+        logger.error("Kaggle package not installed")
+        logger.info("Install with: pip install kaggle")
         return False
 
 
-def download_fashion_product_images(target_dir="./data/raw_images"):
+def download_fashion_product_images(target_dir: str = "./data/raw_images") -> bool:
     """
     Download Fashion Product Images Dataset from Kaggle
-    
-    Dataset: ~44K fashion product images
-    Source: https://www.kaggle.com/datasets/paramaggarwal/fashion-product-images-dataset
+    Dataset: ~44K images, ~15GB
     """
-    print("\n" + "="*60)
-    print("DOWNLOADING FASHION PRODUCT IMAGES DATASET")
-    print("="*60)
+    logger.info("="*60)
+    logger.info("DOWNLOADING FASHION PRODUCT IMAGES DATASET")
+    logger.info("="*60)
+    logger.warning("Dataset size: ~15 GB | Images: ~44,000")
+    
+    # Check disk space (need ~20GB for download + extraction)
+    if not check_disk_space(required_gb=20.0):
+        logger.error("Please free up disk space before continuing")
+        return False
+    
+    # Confirm download
+    logger.info("\nThis will download ~15GB of data. Continue? (y/n)")
+    try:
+        confirmation = input().strip().lower()
+        if confirmation != 'y':
+            logger.info("Download cancelled")
+            return False
+    except (EOFError, KeyboardInterrupt):
+        logger.info("\nDownload cancelled")
+        return False
     
     if not setup_kaggle():
         return False
     
     import kaggle
     
-    # Create temp directory
     temp_dir = "./temp_dataset"
     os.makedirs(temp_dir, exist_ok=True)
     
     try:
-        # Download dataset
-        print("\nDownloading dataset (this may take a few minutes)...")
+        logger.info("\nDownloading dataset (this may take 10-30 minutes)...")
         kaggle.api.dataset_download_files(
             'paramaggarwal/fashion-product-images-dataset',
             path=temp_dir,
@@ -60,54 +108,63 @@ def download_fashion_product_images(target_dir="./data/raw_images"):
             if 'images' in dirs:
                 images_source = os.path.join(root, 'images')
                 break
-            # Sometimes images are directly in the folder
             if len([f for f in files if f.endswith(('.jpg', '.png'))]) > 100:
                 images_source = root
                 break
         
         if not images_source:
-            print("❌ Could not find images in downloaded dataset")
+            logger.error("Could not find images in downloaded dataset")
             return False
         
-        # Copy images to target directory
-        print(f"\nCopying images to {target_dir}...")
-        os.makedirs(target_dir, exist_ok=True)
-        
-        image_count = 0
+        # Count total images first
+        all_images = []
         for root, _, files in os.walk(images_source):
             for file in files:
                 if file.lower().endswith(('.jpg', '.jpeg', '.png')):
-                    src = os.path.join(root, file)
-                    dst = os.path.join(target_dir, file)
-                    shutil.copy2(src, dst)
-                    image_count += 1
-                    
-                    if image_count % 1000 == 0:
-                        print(f"  Copied {image_count} images...")
+                    all_images.append(os.path.join(root, file))
         
-        print(f"\n✓ Successfully copied {image_count} images to {target_dir}")
+        logger.info(f"Found {len(all_images)} images. Copying to {target_dir}...")
+        os.makedirs(target_dir, exist_ok=True)
+        
+        # Copy with progress bar
+        for src in tqdm(all_images, desc="Copying images", unit="img"):
+            dst = os.path.join(target_dir, os.path.basename(src))
+            shutil.copy2(src, dst)
+        
+        logger.info(f"Successfully copied {len(all_images)} images")
         
         # Cleanup
-        print("\nCleaning up temporary files...")
+        logger.info("Cleaning up temporary files...")
         shutil.rmtree(temp_dir)
         
         return True
         
+    except KeyboardInterrupt:
+        logger.warning("\nDownload interrupted by user")
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        return False
     except Exception as e:
-        print(f"❌ Error downloading dataset: {e}")
+        logger.error(f"Error downloading dataset: {e}")
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
         return False
 
 
-def download_sample_images(target_dir="./data/raw_images", n_samples=100):
+def download_sample_images(target_dir: str = "./data/raw_images", n_samples: int = 100) -> bool:
     """
     Download a small sample of images for testing
-    Uses a public dataset or generates sample images
+    Uses Fashion MNIST dataset (~50MB download)
     """
-    print("\n" + "="*60)
-    print(f"DOWNLOADING {n_samples} SAMPLE IMAGES FOR TESTING")
-    print("="*60)
+    logger.info("="*60)
+    logger.info(f"DOWNLOADING {n_samples} SAMPLE IMAGES FOR TESTING")
+    logger.info("="*60)
+    logger.info("Dataset: Fashion MNIST | Size: ~50 MB")
+    
+    # Check disk space
+    if not check_disk_space(required_gb=0.5):
+        logger.error("Please free up disk space")
+        return False
     
     os.makedirs(target_dir, exist_ok=True)
     
@@ -116,38 +173,37 @@ def download_sample_images(target_dir="./data/raw_images", n_samples=100):
         from PIL import Image
         import numpy as np
         
-        # Download Fashion MNIST as fallback
-        print("\nDownloading Fashion MNIST for testing...")
+        logger.info("\nDownloading Fashion MNIST dataset...")
         dataset = FashionMNIST(
             root='./data/fashion_mnist',
             train=True,
             download=True
         )
         
-        # Convert and save samples
-        print(f"Converting {n_samples} images...")
-        for i in range(min(n_samples, len(dataset))):
+        n_to_save = min(n_samples, len(dataset))
+        logger.info(f"Converting {n_to_save} images to RGB format...")
+        
+        for i in tqdm(range(n_to_save), desc="Processing images", unit="img"):
             img, _ = dataset[i]
-            # Convert grayscale to RGB
             img_rgb = Image.fromarray(np.array(img)).convert('RGB')
-            # Resize to realistic size
             img_rgb = img_rgb.resize((224, 224))
             img_rgb.save(f"{target_dir}/sample_{i:04d}.png")
-            
-            if (i + 1) % 100 == 0:
-                print(f"  Saved {i + 1} images...")
         
-        print(f"\n✓ Successfully saved {min(n_samples, len(dataset))} sample images")
+        logger.info(f"Successfully saved {n_to_save} sample images")
         return True
         
+    except ImportError as e:
+        logger.error(f"Missing dependency: {e}")
+        logger.info("Install with: pip install torchvision pillow")
+        return False
     except Exception as e:
-        print(f"❌ Error: {e}")
+        logger.error(f"Error: {e}")
         return False
 
 
-def list_available_datasets():
+def list_available_datasets() -> None:
     """List popular e-commerce datasets available on Kaggle"""
-    datasets = [
+    datasets: List[Dict[str, str]] = [
         {
             "name": "Fashion Product Images",
             "kaggle_id": "paramaggarwal/fashion-product-images-dataset",
@@ -171,62 +227,73 @@ def list_available_datasets():
         }
     ]
     
-    print("\n" + "="*60)
-    print("AVAILABLE E-COMMERCE DATASETS")
-    print("="*60)
+    logger.info("="*60)
+    logger.info("AVAILABLE E-COMMERCE DATASETS")
+    logger.info("="*60)
     
     for i, ds in enumerate(datasets, 1):
-        print(f"\n{i}. {ds['name']}")
-        print(f"   Kaggle ID: {ds['kaggle_id']}")
-        print(f"   Size: {ds['size']}")
-        print(f"   Images: {ds['images']}")
-        print(f"   Description: {ds['description']}")
+        logger.info(f"\n{i}. {ds['name']}")
+        logger.info(f"   Kaggle ID: {ds['kaggle_id']}")
+        logger.info(f"   Size: {ds['size']}")
+        logger.info(f"   Images: {ds['images']}")
+        logger.info(f"   Description: {ds['description']}")
 
 
-def main():
+def main() -> None:
     """Main menu for dataset download"""
-    print("\n" + "="*60)
-    print("E-COMMERCE DATASET DOWNLOADER")
-    print("="*60)
+    # Setup logging for command-line usage
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%H:%M:%S'
+    )
     
-    print("\nOptions:")
-    print("1. Download Fashion Product Images (Full - ~44K images)")
-    print("2. Download sample images for testing (100 images)")
-    print("3. List available datasets")
-    print("4. Exit")
+    logger.info("="*60)
+    logger.info("E-COMMERCE DATASET DOWNLOADER")
+    logger.info("="*60)
     
-    choice = input("\nEnter your choice (1-4): ").strip()
+    logger.info("\nOptions:")
+    logger.info("1. Download Fashion Product Images (Full - ~44K images, ~15GB)")
+    logger.info("2. Download sample images for testing (100 images, ~50MB)")
+    logger.info("3. List available datasets")
+    logger.info("4. Exit")
+    
+    try:
+        choice = input("\nEnter your choice (1-4): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        logger.info("\nExiting...")
+        return
     
     if choice == "1":
         success = download_fashion_product_images()
         if success:
-            print("\n" + "="*60)
-            print("READY TO USE!")
-            print("="*60)
-            print("Run: python main.py")
+            logger.info("="*60)
+            logger.info("READY TO USE!")
+            logger.info("="*60)
+            logger.info("Next step: python main.py --recompute-features")
     
     elif choice == "2":
         success = download_sample_images(n_samples=100)
         if success:
-            print("\n" + "="*60)
-            print("READY TO USE!")
-            print("="*60)
-            print("Run: python main.py")
+            logger.info("="*60)
+            logger.info("READY TO USE!")
+            logger.info("="*60)
+            logger.info("Next step: python main.py")
     
     elif choice == "3":
         list_available_datasets()
-        print("\nTo download manually:")
-        print("1. Visit the Kaggle dataset page")
-        print("2. Download the ZIP file")
-        print("3. Extract images to ./data/raw_images/")
+        logger.info("\nManual download instructions:")
+        logger.info("1. Visit the Kaggle dataset page")
+        logger.info("2. Download the ZIP file")
+        logger.info("3. Extract images to ./data/raw_images/")
+        logger.info("4. Run: python main.py --recompute-features")
     
     elif choice == "4":
-        print("Exiting...")
+        logger.info("Exiting...")
     
     else:
-        print("Invalid choice!")
+        logger.warning("Invalid choice! Please enter 1-4")
 
 
 if __name__ == "__main__":
     main()
-
